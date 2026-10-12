@@ -541,13 +541,23 @@ function err(t) { $("pErr").textContent = t || ""; if (t) toast(t, "no"); }
 
 $("pGo").addEventListener("click", signIn);
 $("pPin").addEventListener("keydown", function (e) { if (e.key === "Enter") signIn(); });
+// the 4th digit signs in on its own, no need to press Continue
+$("pPin").addEventListener("input", function () {
+  var v = this.value.replace(/\D/g, "").slice(0, 4);
+  if (v !== this.value) this.value = v;
+  if (v.length === 4 && $("pName").value && !$("pGo").disabled) signIn();
+});
+$("pName").addEventListener("change", function () {
+  if (/^\d{4}$/.test($("pPin").value) && this.value && !$("pGo").disabled) signIn();
+});
 function signIn() {
+  if ($("pGo").disabled) return; // already signing in
   var name = $("pName").value, pin = $("pPin").value.trim();
   if (!name) { err("Pick your name first."); $("pName").focus(); return; }
   if (!/^\d{4}$/.test(pin)) { err("Enter your 4-digit PIN."); $("pPin").focus(); return; }
   err(""); $("pGo").disabled = true;
   call("signIn", name, pin).then(function (r) { enterPanel(r, pin, ""); })
-    .catch(function (e) { err(msg(e)); }).then(function () { $("pGo").disabled = false; });
+    .catch(function (e) { err(msg(e)); $("pPin").value = ""; $("pPin").focus(); }).then(function () { $("pGo").disabled = false; });
 }
 function enterPanel(r, pin, face) {
   P.name = r.name; P.pin = pin; P.face = !!face; setMine(r.mine); store.set("att.me", r.name);
