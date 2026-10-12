@@ -413,6 +413,20 @@ function renderLoc() {
   el.innerHTML = v.lat != null ? "📍 Location shared with your clock actions (within " + Math.round(v.acc) + " m)"
     : '<span style="color:var(--orange)">📍 Location not shared (' + esc(v.err.toLowerCase()) + ")." + (v.err === "Refused" ? " Allow location for this page in your browser so your clock actions count." : "") + "</span>";
 }
+/* Public IP address of this connection (office Wi-Fi, mobile data, home...), looked up from a free service. */
+var IP = { at: 0, v: "" };
+function getIp() {
+  if (IP.v && Date.now() - IP.at < 300000) return Promise.resolve(IP.v);
+  var one = function (url, pick) {
+    return Promise.race([
+      fetch(url, { cache: "no-store" }).then(function (r) { return r.text(); }).then(pick),
+      new Promise(function (res) { setTimeout(function () { res(""); }, 4000); })
+    ]).catch(function () { return ""; });
+  };
+  return one("https://api.ipify.org?format=json", function (t) { return JSON.parse(t).ip || ""; })
+    .then(function (v) { return v || one("https://ipv4.icanhazip.com/", function (t) { return t.trim(); }); })
+    .then(function (v) { if (v) IP = { at: Date.now(), v: v }; return v || "Unknown"; });
+}
 function mapUrl(loc) { var m = String(loc || "").match(/^(-?\d+\.\d+),(-?\d+\.\d+)/); return m ? "https://maps.google.com/?q=" + m[1] + "," + m[2] : ""; }
 function locLink(loc) {
   if (!loc) return "";
@@ -520,7 +534,7 @@ function card(p, ev, t) {
   return '<div class="card" style="--sc:' + COLOR[st] + '"><div class="nm">' + esc(p.name) + "</div>" +
     '<div class="row"><span class="pill"><i style="background:' + COLOR[st] + '"></i>' + LABEL[st] + '</span><span class="timer" data-since="' + since + '" data-st="' + st + '">' + dur(t - since) + "</span>" + flags.join("") + "</div>" +
     '<div class="sub">' + devIcon(lastE[2]) + esc(lastE[2] || "") + " · in since " + clock(ev[0][0]) + " · breaks " + breaks + "/" + S.limits.Break.count + " · lunch " + (lunch ? "taken" : "not yet") +
-    (lastE[5] ? " · " + locLink(lastE[5]) : "") + "</div>" +
+    (lastE[5] ? " · " + locLink(lastE[5]) : "") + (lastE[6] ? " · IP " + esc(lastE[6]) : "") + "</div>" +
     (S.mgrPin ? '<button class="force" type="button" data-out="' + esc(p.name) + '">Clock out (manager)</button>' : "") + "</div>";
 }
 $("deptSeg").addEventListener("click", function (e) { var b = e.target.closest("button"); if (b) { S.dept = b.dataset.v; renderWall(); } });
@@ -564,6 +578,7 @@ function enterPanel(r, pin, face) {
   $("pPin").value = ""; $("step1").classList.add("hidden"); $("step2").classList.remove("hidden");
   renderMe(); renderSetup(); armLock(); syncBreak();
   getLoc(); // asks for location now, so the browser's question shows before they tap anything
+  getIp();
 }
 
 /* ---------- Face ID / Windows Hello (passkeys). The face never leaves the device. ---------- */
@@ -677,8 +692,8 @@ $("acts").addEventListener("click", function (e) {
   // signed in with Face ID: every action needs the face or fingerprint again, not only the sign-in
   var pkP = P.face ? faceAssert(P.name) : Promise.resolve(null);
   pkP.then(function (pk) {
-    return getLoc().then(function (loc) {
-      return call("act", { name: P.name, pin: P.pin, pk: pk, action: a, device: DEV.type, details: DEV.details, loc: loc });
+    return Promise.all([getLoc(), getIp()]).then(function (got) {
+      return call("act", { name: P.name, pin: P.pin, pk: pk, action: a, device: DEV.type, details: DEV.details, loc: got[0], ip: got[1] });
     });
   }).then(function (r) {
     setMine(r.mine);
@@ -769,7 +784,7 @@ function dayRows() {
     var total = end - first[0], away = (sum.totals.Break || 0) + (sum.totals.Lunch || 0) + (sum.totals.Bathroom || 0);
     var devices = {}; ev.forEach(function (e) { if (e[5] && e[5] !== "System" && e[5] !== "Manager") devices[e[5]] = (devices[e[5]] || 0) + 1; });
     var flags = []; ev.forEach(function (e) { if (e[7]) e[7].split("; ").forEach(function (f) { if (flags.indexOf(f) < 0) flags.push(f); }); });
-    return { name: first[1], dept: first[2], inMs: first[0], inDev: first[5], inLoc: first[9] || "", outLoc: open ? "" : last[9] || "", outMs: open ? 0 : last[0], open: open, total: total, worked: total - away, sum: sum, devices: devices, flags: flags, end: end };
+    return { name: first[1], dept: first[2], inMs: first[0], inDev: first[5], inLoc: first[9] || "", outLoc: open ? "" : last[9] || "", inIp: first[10] || "", outIp: open ? "" : last[10] || "", outMs: open ? 0 : last[0], open: open, total: total, worked: total - away, sum: sum, devices: devices, flags: flags, end: end };
   });
   rows.sort(function (a, b) { return a.inMs - b.inMs; });
   return rows;
@@ -790,8 +805,8 @@ function renderDay() {
     }).join("");
     var devs = Object.keys(r.devices).map(function (d) { return devIcon(d).replace("<svg", '<svg style="width:13px;height:13px;vertical-align:-2px"') + " " + esc(d) + " ×" + r.devices[d]; }).join("<br>");
     return "<tr><td><div class='nm'>" + esc(r.name) + "</div><div class='dp'>" + esc(r.dept) + "</div><div class='tl'>" + tl + "</div></td>" +
-      "<td class='n'>" + clock(r.inMs) + "<div class='dp'>" + devIcon(r.inDev).replace("<svg", '<svg style="width:12px;height:12px;vertical-align:-2px"') + " " + esc(r.inDev) + "</div>" + (r.inLoc ? "<div class='dp'>" + locLink(r.inLoc) + "</div>" : "") + "</td>" +
-      "<td class='n'>" + (r.open ? "<b>Still in</b>" : clock(r.outMs)) + (r.outLoc ? "<div class='dp'>" + locLink(r.outLoc) + "</div>" : "") + "</td>" +
+      "<td class='n'>" + clock(r.inMs) + "<div class='dp'>" + devIcon(r.inDev).replace("<svg", '<svg style="width:12px;height:12px;vertical-align:-2px"') + " " + esc(r.inDev) + "</div>" + (r.inLoc ? "<div class='dp'>" + locLink(r.inLoc) + "</div>" : "") + (r.inIp ? "<div class='dp'>IP " + esc(r.inIp) + "</div>" : "") + "</td>" +
+      "<td class='n'>" + (r.open ? "<b>Still in</b>" : clock(r.outMs)) + (r.outLoc ? "<div class='dp'>" + locLink(r.outLoc) + "</div>" : "") + (r.outIp ? "<div class='dp'>IP " + esc(r.outIp) + "</div>" : "") + "</td>" +
       "<td class='n'>" + dur(r.worked) + "<div class='dp'>of " + dur(r.total) + "</div></td>" +
       "<td class='n'>" + u.Break.length + " · " + dur(t.Break || 0) + (bOver ? " <span class='flag'>" + bOver + " over</span>" : "") + "</td>" +
       "<td class='n'>" + (u.Lunch.length ? dur(t.Lunch) : "None") + (lOver ? " <span class='flag'>over</span>" : "") + "</td>" +
@@ -803,11 +818,11 @@ function renderDay() {
 }
 $("rCsv").addEventListener("click", function () {
   var rows = dayRows(); if (!rows.length) { toast("Nothing to download for this day."); return; }
-  var head = ["Name", "Department", "Clock in", "Clocked in from", "Clock-in location", "Clock out", "Clock-out location", "Worked (min)", "Total (min)", "Breaks", "Break minutes", "Lunch minutes", "Bathroom visits", "Bathroom minutes", "Meeting minutes", "Coaching minutes", "Training minutes", "Devices", "Flags"];
+  var head = ["Name", "Department", "Clock in", "Clocked in from", "Clock-in location", "Clock-in IP", "Clock out", "Clock-out location", "Clock-out IP", "Worked (min)", "Total (min)", "Breaks", "Break minutes", "Lunch minutes", "Bathroom visits", "Bathroom minutes", "Meeting minutes", "Coaching minutes", "Training minutes", "Devices", "Flags"];
   var m = function (ms) { return Math.round((ms || 0) / 60000); };
   var lines = [head].concat(rows.map(function (r) {
     var t = r.sum.totals;
-    return [r.name, r.dept, clock(r.inMs), r.inDev, mapUrl(r.inLoc) || r.inLoc, r.open ? "Still in" : clock(r.outMs), mapUrl(r.outLoc) || r.outLoc, m(r.worked), m(r.total), r.sum.use.Break.length, m(t.Break), m(t.Lunch),
+    return [r.name, r.dept, clock(r.inMs), r.inDev, mapUrl(r.inLoc) || r.inLoc, r.inIp, r.open ? "Still in" : clock(r.outMs), mapUrl(r.outLoc) || r.outLoc, r.outIp, m(r.worked), m(r.total), r.sum.use.Break.length, m(t.Break), m(t.Lunch),
       r.sum.segs.filter(function (s) { return s.status === "Bathroom"; }).length, m(t.Bathroom), m(t.Meeting), m(t.Coaching), m(t.Training),
       Object.keys(r.devices).map(function (d) { return d + " x" + r.devices[d]; }).join(" / "), r.flags.join(" / ")];
   })).map(function (row) { return row.map(function (v) { var s = String(v == null ? "" : v); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; }).join(","); }).join("\r\n");
