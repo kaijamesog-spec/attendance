@@ -362,7 +362,7 @@ function msg(e) { return String(e && e.message || e).replace(/^Exception:\s*/, "
 /* ---------- state ---------- */
 var S = { ver: "", staff: [], sessions: {}, lastOut: {}, limits: { Break: { count: 2, minutes: 15 }, Lunch: { count: 1, minutes: 60 } }, skew: 0, dept: "All",
           mgrPin: "", ready: false };
-var P = { name: store.get("att.me") || "", pin: "", token: "", status: "Out", since: 0, events: [], lockT: null };
+var P = { name: store.get("att.me") || "", pin: "", face: false, status: "Out", since: 0, events: [], lockT: null };
 function now() { return Date.now() + S.skew; }
 
 /* The server only sends everyone's status to board members (manager PIN). Staff get the names list. */
@@ -453,7 +453,7 @@ function tickBreak() {
 setInterval(tickBreak, 1000);
 $("brkBack").addEventListener("click", function () {
   if (!BRK) return;
-  if ((P.pin || P.token) && P.name === BRK.name) { var w = document.querySelector('#acts [data-a="Working"]'); if (w && !w.disabled) { w.click(); return; } }
+  if ((P.pin || P.face) && P.name === BRK.name) { var w = document.querySelector('#acts [data-a="Working"]'); if (w && !w.disabled) { w.click(); return; } }
   var name = BRK.name;
   lockPanel(); P.name = name; renderNames(); $("pName").value = name;
   $("pPin").scrollIntoView({ behavior: "smooth", block: "center" }); $("pPin").focus();
@@ -549,8 +549,8 @@ function signIn() {
   call("signIn", name, pin).then(function (r) { enterPanel(r, pin, ""); })
     .catch(function (e) { err(msg(e)); }).then(function () { $("pGo").disabled = false; });
 }
-function enterPanel(r, pin, token) {
-  P.name = r.name; P.pin = pin; P.token = token; setMine(r.mine); store.set("att.me", r.name);
+function enterPanel(r, pin, face) {
+  P.name = r.name; P.pin = pin; P.face = !!face; setMine(r.mine); store.set("att.me", r.name);
   $("pPin").value = ""; $("step1").classList.add("hidden"); $("step2").classList.remove("hidden");
   renderMe(); renderSetup(); armLock(); syncBreak();
   getLoc(); // asks for location now, so the browser's question shows before they tap anything
@@ -592,16 +592,21 @@ function faceErr(e, what) {
   if (e && e.name === "SecurityError") return what + " isn't allowed on this page.";
   return msg(e);
 }
+/* One Face ID / fingerprint check: a fresh challenge from the server, signed by this device. */
+function faceAssert(name) {
+  return call("pkStart", name).then(function (o) {
+    return navigator.credentials.get({ publicKey: { challenge: unb64u(o.challenge), rpId: o.rpId, userVerification: "required", timeout: 60000,
+      allowCredentials: o.allow.map(function (id) { return { type: "public-key", id: unb64u(id) }; }) } });
+  }).then(function (c) {
+    return { id: c.id, clientDataJSON: b64u(c.response.clientDataJSON), authenticatorData: b64u(c.response.authenticatorData), signature: b64u(c.response.signature) };
+  });
+}
 $("pFace").addEventListener("click", function () {
   var name = $("pName").value;
   if (!name) { err("Pick your name first."); $("pName").focus(); return; }
   err(""); $("pFace").disabled = true;
-  call("pkStart", name).then(function (o) {
-    return navigator.credentials.get({ publicKey: { challenge: unb64u(o.challenge), rpId: o.rpId, userVerification: "required", timeout: 60000,
-      allowCredentials: o.allow.map(function (id) { return { type: "public-key", id: unb64u(id) }; }) } });
-  }).then(function (c) {
-    return call("pkSignIn", name, { id: c.id, clientDataJSON: b64u(c.response.clientDataJSON), authenticatorData: b64u(c.response.authenticatorData), signature: b64u(c.response.signature) });
-  }).then(function (r) { store.set("att.pk." + r.name, "1"); enterPanel(r, "", r.token); })
+  faceAssert(name).then(function (pk) { return call("pkSignIn", name, pk); })
+    .then(function (r) { store.set("att.pk." + r.name, "1"); enterPanel(r, "", true); })
     .catch(function (e) { err(faceErr(e, FACE.label)); })
     .then(function () { $("pFace").disabled = false; });
 });
@@ -628,7 +633,7 @@ $("pSetup").addEventListener("click", function () {
   }).then(function () { $("pSetup").disabled = false; armLock(); });
 });
 
-function lockPanel() { P.pin = ""; P.token = ""; P.events = []; clearTimeout(P.lockT); $("step2").classList.add("hidden"); $("step1").classList.remove("hidden"); err(""); }
+function lockPanel() { P.pin = ""; P.face = false; P.events = []; clearTimeout(P.lockT); $("step2").classList.add("hidden"); $("step1").classList.remove("hidden"); err(""); }
 function armLock() { clearTimeout(P.lockT); P.lockT = setTimeout(function () { lockPanel(); toast("Panel locked."); }, 90000); }
 $("pDone").addEventListener("click", lockPanel);
 
@@ -659,8 +664,12 @@ $("acts").addEventListener("click", function (e) {
   armLock();
   document.querySelectorAll("#acts .act").forEach(function (x) { x.disabled = true; });
   if (!(LOC.v && Date.now() - LOC.at < 60000)) $("meLoc").textContent = "📍 Getting your location…";
-  getLoc().then(function (loc) {
-    return call("act", { name: P.name, pin: P.pin, token: P.token, action: a, device: DEV.type, details: DEV.details, loc: loc });
+  // signed in with Face ID: every action needs the face or fingerprint again, not only the sign-in
+  var pkP = P.face ? faceAssert(P.name) : Promise.resolve(null);
+  pkP.then(function (pk) {
+    return getLoc().then(function (loc) {
+      return call("act", { name: P.name, pin: P.pin, pk: pk, action: a, device: DEV.type, details: DEV.details, loc: loc });
+    });
   }).then(function (r) {
     setMine(r.mine);
     renderMe(); err(""); syncBreak();
@@ -669,7 +678,7 @@ $("acts").addEventListener("click", function (e) {
     if (a === "in") hello("in", r.msg + " From your " + DEV.type.toLowerCase() + "." + extra);
     else if (a === "out") { hello("out", r.msg + extra); lockPanel(); }
     else toast(r.msg + extra, r.flags && r.flags.length ? "no" : "ok");
-  }).catch(function (e2) { err(msg(e2)); renderMe(); });
+  }).catch(function (e2) { err(P.face ? faceErr(e2, FACE.label) : msg(e2)); renderMe(); });
 });
 
 /* the welcome / goodbye moment: Claudia says hi, Casper sees you out */
